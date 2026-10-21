@@ -1,0 +1,8 @@
+# อนุญาตให้ Web Crawlers เข้าถึงหน้าหลักและเนื้อหาทั่วไป
+User-agent: *
+Allow: /
+
+# ป้องกันไม่ให้บอทเข้าถึงหน้ากระบวนการสั่งซื้อ, ตะกร้า และ API
+Disallow: /checkout
+Disallow: /tracking
+Disallow: /api/
