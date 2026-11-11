@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { slide, fade, fly } from "svelte/transition";
 
-  // นำเข้าไอคอนแบบ Subpath เพื่อลดขนาด Bundle ให้โหลดเร็วที่สุด
+  // Icons
   import Search from "lucide-svelte/icons/search";
   import ShoppingCart from "lucide-svelte/icons/shopping-cart";
   import Star from "lucide-svelte/icons/star";
@@ -33,23 +33,111 @@
   import StoreIcon from "lucide-svelte/icons/store";
   import MessageSquare from "lucide-svelte/icons/message-square";
   import PenLine from "lucide-svelte/icons/pen-line";
+  import Flame from "lucide-svelte/icons/flame";
+  import Rocket from "lucide-svelte/icons/rocket";
+  import TrendingUp from "lucide-svelte/icons/trending-up";
+  import WifiOff from "lucide-svelte/icons/wifi-off";
+  import Wifi from "lucide-svelte/icons/wifi";
+  import UserCircle from "lucide-svelte/icons/user-circle";
 
-  import { STORES, MENU, SLOTS, INITIAL_PAST_ORDERS } from "./mockData";
-  import type { Screen, OrderStatus, MenuItem, CartItem, Order, OrderItem, PastOrder } from "./types";
+  import { STORES, MENU, SLOTS, INITIAL_PAST_ORDERS, INITIAL_REVIEWS } from "./mockData";
+  import type { Screen, OrderStatus, MenuItem, CartItem, Order, OrderItem, PastOrder, Review, LiveOrder } from "./types";
   import OptionModal from "./components/OptionModal.svelte";
   import LoginModal from "./components/LoginModal.svelte";
   import ReceiptModal from "./components/ReceiptModal.svelte";
+  import ReviewList from "./components/ReviewList.svelte";
+  import EditReviewModal from "./components/EditReviewModal.svelte";
+  import ReportModal from "./components/ReportModal.svelte";
+  import ReviewModal from "./components/ReviewModal.svelte";
 
-  // ฟังก์ชันช่วยเหลือสำหรับจัดรูปแบบการแสดงผล
   const money = (n: number) => `฿${n.toFixed(2)}`;
   const pad = (n: number) => String(n).padStart(2, "0");
   const fmtCountdown = (s: number) => `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
 
-  // Application States (Svelte 5 Runes)
-  let isAuthenticated = $state(false);
+  const loadFromStorage = <T,>(key: string, fallback: T): T => {
+    if (typeof localStorage === 'undefined') return fallback;
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? (JSON.parse(raw) as T) : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
+  const saveToStorage = (key: string, value: unknown) => {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {}
+  };
+
+  const calculateOrderDuration = (items: OrderItem[]): number => {
+    const prepTimes = items.map(item => {
+      const menuItem = MENU.find(m => m.name === item.name);
+      if (!menuItem?.prepTime) return 5;
+      const match = menuItem.prepTime.match(/(\d+)/);
+      return match ? parseInt(match[1]) : 5;
+    });
+    const maxPrepTime = Math.max(...prepTimes, 3);
+    const queueBuffer = Math.min(items.length * 2, 10);
+    return (maxPrepTime + queueBuffer) * 60;
+  };
+
+  // ⬇️ ใหม่: รายชื่อธนาคารสำหรับช่องทาง Mobile Banking (คลิกเลือกได้)
+  interface BankOption {
+    id: string;
+    name: string;
+    app: string;
+  }
+
+  const BANKS: BankOption[] = [
+    { id: "kbank", name: "ธนาคารกสิกรไทย", app: "K PLUS" },
+    { id: "scb", name: "ธนาคารไทยพาณิชย์", app: "SCB EASY" },
+    { id: "ktb", name: "ธนาคารกรุงไทย", app: "KTB NEXT" },
+  ];
+
+  interface StoreLiveStats {
+    ordering: number;
+    cooking: number;
+    ready: number;
+    active: number;
+    total: number;
+  }
+
+  const createSimOrder = (storeId: string, status: OrderStatus): LiveOrder => ({
+    id: "SIM-" + Math.random().toString(36).slice(2, 8),
+    storeIds: [storeId],
+    status,
+    isMine: false,
+    customer: "นักศึกษา " + Math.floor(66000000 + Math.random() * 999999),
+  });
+
+  const seedLiveOrders = (): LiveOrder[] => [
+    createSimOrder("s1", 0),
+    createSimOrder("s1", 1),
+    createSimOrder("s2", 0),
+    createSimOrder("s3", 1),
+    createSimOrder("s3", 2),
+    createSimOrder("s5", 0),
+    createSimOrder("s6", 1),
+  ];
+
+  // ============ States ============
+  let isAuthenticated = $state(true);
+  let currentUserId = $state<string>("67141977");
+  let currentUserName = $state<string>("ชารีฟ");
+
+  let lastLoginMethod = $state(
+    typeof localStorage !== 'undefined' && localStorage.getItem('lastLogin')
+      ? localStorage.getItem('lastLogin')!
+      : 'Google'
+  );
+
   let showLogin = $state(false);
   let loginLoading = $state(false);
   let afterLoginAction = $state<(() => void) | null>(null);
+
+  let isOnline = $state(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
   let screen = $state<Screen>("home");
   let activeStoreId = $state<string>("s1");
@@ -57,20 +145,63 @@
   let slot = $state<string>("12:00 น.");
   let orderNote = $state<string>("");
   let payMethod = $state<"promptpay" | "banking">("promptpay");
+  let selectedBank = $state<string | null>(null); // ⬅️ ใหม่: ธนาคารที่เลือก
   let paying = $state(false);
   let query = $state("");
 
-  // Modal & Order States
   let optionModalItem = $state<MenuItem | null>(null);
   let order = $state<Order | null>(null);
-  let secondsLeft = $state(510);
+  let secondsLeft = $state(0);
   let soundOn = $state(true);
   let receiptOpen = $state(false);
 
-  let historyOrders = $state<PastOrder[]>(INITIAL_PAST_ORDERS);
+  let historyOrders = $state<PastOrder[]>(loadFromStorage<PastOrder[]>('spu_history', INITIAL_PAST_ORDERS));
+  let reviews = $state<Review[]>(loadFromStorage<Review[]>('spu_reviews', INITIAL_REVIEWS));
+
+  $effect(() => { saveToStorage('spu_history', historyOrders); });
+  $effect(() => { saveToStorage('spu_reviews', reviews); });
+
+  let liveOrders = $state<LiveOrder[]>(seedLiveOrders());
+
   let rating = $state(0);
   let review = $state("");
   let submittedReview = $state<{ rating: number; text: string } | null>(null);
+  let editingReview = $state<Review | null>(null);
+  let reportingReview = $state<Review | null>(null);
+  let reviewingHistory = $state<PastOrder | null>(null);
+
+  let reviewModalData = $derived.by(() => {
+    const target = reviewingHistory;
+    if (!target) return null;
+    const store = STORES.find(s => s.id === target.storeId);
+    return { order: target, store };
+  });
+
+  let myOrderStoreIds = $derived.by(() => {
+    if (!order) return [];
+    return Array.from(new Set(order.items.map(i => MENU.find(m => m.name === i.name)?.storeId ?? "s1")));
+  });
+
+  let storeStats = $derived.by(() => {
+    const map: Record<string, StoreLiveStats> = {};
+    for (const s of STORES) {
+      const rel = liveOrders.filter(o => o.storeIds.includes(s.id));
+      const ordering = rel.filter(o => o.status === 0).length;
+      const cooking = rel.filter(o => o.status === 1).length;
+      const ready = rel.filter(o => o.status === 2).length;
+      map[s.id] = {
+        ordering,
+        cooking,
+        ready,
+        active: ordering + cooking,
+        total: rel.length,
+      };
+    }
+    return map;
+  });
+
+  // ⬇️ ใหม่: ธนาคารที่เลือกอยู่ (object) ใช้แสดงชื่อบนปุ่มยืนยัน
+  let selectedBankObj = $derived(BANKS.find(b => b.id === selectedBank) ?? null);
 
   let demoOpen = $state(false);
   let toast = $state<string | null>(null);
@@ -92,12 +223,22 @@
     }
   };
 
+  // ⬇️ ใหม่: คลิกเลือกธนาคาร
+  const selectBank = (b: BankOption) => {
+    selectedBank = b.id;
+    showToast(`เลือกชำระเงินผ่าน ${b.name} (${b.app}) แล้ว`);
+  };
+
   const executeLoginSuccess = (method: string) => {
     loginLoading = true;
     setTimeout(() => {
       isAuthenticated = true;
+      currentUserId = "67141977";
+      currentUserName = "ชารีฟ";
       loginLoading = false;
       showLogin = false;
+      localStorage.setItem('lastLogin', method);
+      lastLoginMethod = method;
       showToast(method === "email" ? "เข้าสู่ระบบสำเร็จ! ยินดีต้อนรับนักศึกษา SPU" : `เข้าสู่ระบบด้วย ${method} สำเร็จ!`);
       if (afterLoginAction) {
         afterLoginAction();
@@ -106,11 +247,20 @@
     }, 1200);
   };
 
+  const handleLogout = () => {
+    isAuthenticated = false;
+    currentUserId = "";
+    currentUserName = "";
+    screen = "home";
+    cart = [];
+    showToast("ออกจากระบบเรียบร้อยแล้ว");
+  };
+
   const addItemToCart = (item: MenuItem, option: string = "", note: string = "") => {
-    const cartId = `${item.id}-${option}-${note}`;
-    const existing = cart.find((c) => c.cartId === cartId);
+    const cartId = `${item.id}-${option}-${note}-${Date.now()}`;
+    const existing = cart.find((c) => c.itemId === item.id && c.option === option && c.note === note);
     if (existing) {
-      cart = cart.map((c) => (c.cartId === cartId ? { ...c, qty: c.qty + 1 } : c));
+      cart = cart.map((c) => (c.cartId === existing.cartId ? { ...c, qty: c.qty + 1 } : c));
     } else {
       cart = [...cart, { cartId, itemId: item.id, qty: 1, option, note }];
     }
@@ -119,6 +269,9 @@
 
   const handleAddClick = (item: MenuItem) => {
     requireAuth(() => {
+      if (!isOnline) {
+        showToast("⚠️ ออฟไลน์อยู่ - สามารถเพิ่มลงตะกร้าได้ แต่จะส่งออเดอร์ไม่ได้");
+      }
       if (item.optionsType) {
         optionModalItem = item;
       } else {
@@ -148,7 +301,6 @@
     }
   };
 
-  // คำนวณค่าจาก State (Derived Values)
   let cartLines = $derived(
     cart.map((c) => {
       const item = MENU.find((m) => m.id === c.itemId)!;
@@ -172,8 +324,26 @@
         )
   );
 
+  let topMenus = $derived(
+    [...MENU].sort((a, b) => (b.popularity || 0) - (a.popularity || 0)).slice(0, 3)
+  );
+  let newStores = $derived(STORES.filter(s => s.isNew));
+  let trendingStores = $derived(STORES.filter(s => s.trending));
+
   const confirmOrder = () => {
     if (!count || paying) return;
+
+    if (!isOnline) {
+      showToast("❌ ไม่สามารถส่งออเดอร์ได้ ขณะนี้คุณออฟไลน์อยู่");
+      return;
+    }
+
+    // ⬇️ ใหม่: ถ้าเลือก Mobile Banking ต้องแตะเลือกธนาคารก่อน
+    if (payMethod === "banking" && !selectedBank) {
+      showToast("กรุณาเลือกธนาคารก่อนชำระเงิน");
+      return;
+    }
+
     paying = true;
     setTimeout(() => {
       const items: OrderItem[] = cartLines.map((l) => ({
@@ -184,8 +354,8 @@
         option: l.option,
         note: l.note,
       }));
-      order = {
-        id: "#SPU-" + Math.floor(1000 + Math.random() * 9000),
+      const newOrder: Order = {
+        id: "#SPU-" + String(Date.now()).slice(-6),
         code: "A-" + pad(Math.floor(1 + Math.random() * 99)),
         status: 0,
         items,
@@ -193,9 +363,18 @@
         slot,
         createdAt: Date.now(),
       };
+      order = newOrder;
+
+      secondsLeft = calculateOrderDuration(items);
+
+      const storeIds = Array.from(new Set(items.map(i => MENU.find(m => m.name === i.name)?.storeId ?? "s1")));
+      liveOrders = [
+        ...liveOrders.filter(o => !o.isMine),
+        { id: newOrder.id, storeIds, status: 0, isMine: true, customer: currentUserName },
+      ];
+
       cart = [];
       orderNote = "";
-      secondsLeft = 510;
       rating = 0;
       review = "";
       submittedReview = null;
@@ -209,6 +388,8 @@
     if (!order) return;
     const next = Math.min(2, order.status + 1) as OrderStatus;
     order = { ...order, status: next };
+    liveOrders = liveOrders.map(o => (o.id === order!.id ? { ...o, status: next } : o));
+
     if (next === 1) {
       showToast("🔔 อีก 5 นาทีจะถึงเวลานัดรับ กรุณาเตรียมตัวเดินทางมายังโรงอาหาร");
     } else if (next === 2) {
@@ -220,21 +401,44 @@
 
   const completeOrder = () => {
     if (!order) return;
+
+    const firstItemName = order.items[0]?.name;
+    const foundMenuItem = firstItemName ? MENU.find(m => m.name === firstItemName) : null;
+    const orderStoreId = foundMenuItem?.storeId ?? activeStoreId;
+
+    liveOrders = liveOrders.filter(o => o.id !== order!.id);
+
     const newHistory: PastOrder = {
       id: order.id,
       date:
         new Date(order.createdAt).toLocaleDateString("th-TH", {
-          day: "2-digit",
-          month: "short",
-          year: "numeric",
-        }) +
-        " · " +
-        order.slot,
+          day: "2-digit", month: "short", year: "numeric",
+        }) + " · " + order.slot,
       items: order.items.map((i) => `${i.name}${i.option ? ` (${i.option})` : ""} ×${i.qty}`).join(", "),
       total: order.total,
       rating: submittedReview ? submittedReview.rating : 0,
+      storeId: orderStoreId,
     };
+
+    if (submittedReview) {
+      const reviewId = "r" + Date.now();
+      const newReview: Review = {
+        id: reviewId,
+        userId: currentUserId,
+        userName: `${currentUserName} (${currentUserId})`,
+        storeId: orderStoreId,
+        itemId: foundMenuItem?.id,
+        rating: submittedReview.rating,
+        text: submittedReview.text || "ผู้ใช้ให้คะแนนโดยไม่มีความเห็นเพิ่มเติม",
+        date: Date.now(),
+        orderId: order.id,
+      };
+      reviews = [newReview, ...reviews];
+      newHistory.reviewId = reviewId;
+    }
+
     historyOrders = [newHistory, ...historyOrders];
+
     order = null;
     screen = "history";
     showToast("รับอาหารเรียบร้อยแล้ว ขอบคุณที่ใช้บริการ 🙏");
@@ -248,7 +452,7 @@
         const found = MENU.find((m) => m.name === it.name);
         if (found) {
           newCart.push({
-            cartId: `${found.id}-${it.option || ""}-${it.note || ""}-${Date.now()}-${Math.random()}`,
+            cartId: `${found.id}-${it.option || ""}-${it.note || ""}-${Date.now()}`,
             itemId: found.id,
             qty: it.qty,
             option: it.option || "",
@@ -264,6 +468,76 @@
   const submitReview = () => {
     if (!rating) return showToast("กรุณาเลือกจำนวนดาวก่อนส่งรีวิว");
     submittedReview = { rating, text: review };
+    showToast("บันทึกรีวิวแล้ว · จะโพสต์เมื่อคุณกดรับอาหารเสร็จ ✅");
+  };
+
+  const handleEditReview = (r: Review) => {
+    editingReview = r;
+  };
+
+  const handleDeleteReview = (id: string) => {
+    if (confirm("ต้องการลบรีวิวนี้หรือไม่?")) {
+      reviews = reviews.filter(r => r.id !== id);
+      historyOrders = historyOrders.map(h => h.reviewId === id ? { ...h, reviewId: undefined, rating: 0 } : h);
+      showToast("ลบรีวิวเรียบร้อยแล้ว");
+    }
+  };
+
+  const handleSaveReview = (updated: Review) => {
+    reviews = reviews.map(r => r.id === updated.id ? updated : r);
+    historyOrders = historyOrders.map(h => h.reviewId === updated.id ? { ...h, rating: updated.rating } : h);
+    editingReview = null;
+    showToast("บันทึกรีวิวเรียบร้อย");
+  };
+
+  const handleReportReview = (r: Review) => {
+    reportingReview = r;
+  };
+
+  const handleSubmitReport = (reason: string, details: string) => {
+    if (!reportingReview) return;
+
+    const reasonLabels: Record<string, string> = {
+      spam: "สแปม/โฆษณา",
+      harassment: "ก่อกวน/กลั่นแกล้ง",
+      hate: "ข้อความเกลียดชัง",
+      inappropriate: "เนื้อหาไม่เหมาะสม",
+      fake: "รีวิวปลอม",
+      other: "อื่น ๆ",
+    };
+
+    console.log(`🚩 Report submitted:`, {
+      reviewId: reportingReview.id,
+      reason: reasonLabels[reason] || reason,
+      details,
+      reportedUser: reportingReview.userName,
+      timestamp: new Date().toISOString(),
+    });
+
+    reportingReview = null;
+    showToast("🚩 ส่งรายงานเรียบร้อยแล้ว ทีมงานจะตรวจสอบภายใน 24 ชม.");
+  };
+
+  const handleHistoryReviewSubmit = (ratingValue: number, text: string) => {
+    const target = reviewingHistory;
+    if (!target) return;
+
+    const reviewId = "r" + Date.now();
+    const newReview: Review = {
+      id: reviewId,
+      userId: currentUserId,
+      userName: `${currentUserName} (${currentUserId})`,
+      storeId: target.storeId ?? "s1",
+      rating: ratingValue,
+      text,
+      date: Date.now(),
+      orderId: target.id,
+    };
+    reviews = [newReview, ...reviews];
+    historyOrders = historyOrders.map(h =>
+      h.id === target.id ? { ...h, rating: ratingValue, reviewId } : h
+    );
+    reviewingHistory = null;
     showToast("ส่งรีวิวเรียบร้อย ขอบคุณค่ะ 🙏");
   };
 
@@ -273,54 +547,103 @@
         secondsLeft = Math.max(0, secondsLeft - 1);
       }
     }, 1000);
-    return () => clearInterval(countdownInterval);
+
+    const simInterval = setInterval(() => {
+      if (!isOnline) return;
+
+      let next = liveOrders
+        .map(o => {
+          if (o.isMine) return o;
+          if (o.status < 2 && Math.random() < 0.35) {
+            return { ...o, status: (o.status + 1) as OrderStatus };
+          }
+          return o;
+        })
+        .filter(o => o.isMine || !(o.status === 2 && Math.random() < 0.35));
+
+      const simCount = next.filter(o => !o.isMine).length;
+      if (simCount < 10 && Math.random() < 0.45) {
+        const s = STORES[Math.floor(Math.random() * STORES.length)];
+        next = [...next, createSimOrder(s.id, 0)];
+      }
+
+      liveOrders = next;
+    }, 7000);
+
+    const handleOnline = () => {
+      isOnline = true;
+      showToast("🌐 กลับมาออนไลน์แล้ว! สามารถส่งออเดอร์ได้");
+    };
+    const handleOffline = () => {
+      isOnline = false;
+      showToast("📴 คุณออฟไลน์อยู่ (ยังดูเมนู/เวลาที่เหลือได้ แต่ส่งออเดอร์ไม่ได้)");
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      clearInterval(countdownInterval);
+      clearInterval(simInterval);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   });
 </script>
 
 <div class="min-h-screen w-full bg-slate-50 flex flex-col selection:bg-emerald-500 selection:text-white">
-  <!-- Desktop / Global Navigation Header -->
+  <!-- NAVBAR -->
   <header class="sticky top-0 z-40 bg-white/90 backdrop-blur-md border-b border-slate-200">
-    <div class="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-      <div class="flex items-center gap-3">
-        <!-- แสดงรูป Logo จริงจากโฟลเดอร์ public -->
+    <div class="max-w-7xl mx-auto px-3 sm:px-4 lg:px-6 h-16 flex items-center justify-between gap-2 lg:gap-3">
+      <div class="flex items-center gap-2.5 min-w-0 shrink-0">
         <img
           src="/logo.png"
           alt="SPU Smart Food Queue Logo"
-          class="h-11 w-11 object-contain rounded-2xl shadow-sm drop-shadow-sm"
+          class="h-10 w-10 object-contain rounded-xl shadow-sm shrink-0"
           onerror={(e) => {
-            // สำรองหากไฟล์เป็นนามสกุล .webp
             const target = e.currentTarget as HTMLImageElement;
             if (!target.src.endsWith('.webp')) target.src = '/logo.webp';
           }}
         />
-        <div>
-          <h1 class="text-base sm:text-lg font-black text-slate-900 tracking-tight leading-none">
+        <div class="min-w-0">
+          <h1 class="text-sm sm:text-base font-black text-slate-900 tracking-tight leading-none whitespace-nowrap">
             SPU Smart Food Queue
           </h1>
-          <p class="text-[11px] text-slate-400 font-medium mt-0.5">ระบบจองคิวอาหารโรงอาหารล่วงหน้า มหาวิทยาลัยศรีปทุม</p>
+          <p class="hidden 2xl:block text-[10px] text-slate-400 font-medium mt-0.5 truncate max-w-[220px]">
+            ระบบจองคิวอาหารโรงอาหารล่วงหน้า มหาวิทยาลัยศรีปทุม
+          </p>
         </div>
       </div>
 
-      <!-- Desktop Navigation Menu Links -->
-      <nav class="hidden md:flex items-center gap-1 bg-slate-100 p-1.5 rounded-2xl border border-slate-200/80">
+      <div class={`hidden 2xl:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold shrink-0 ${
+        isOnline ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"
+      }`}>
+        {#if isOnline}
+          <Wifi class="w-3 h-3" /> ออนไลน์
+        {:else}
+          <WifiOff class="w-3 h-3" /> ออฟไลน์
+        {/if}
+      </div>
+
+      <nav class="hidden md:flex items-center gap-0.5 bg-slate-100 p-1 rounded-xl border border-slate-200/80 shrink-0">
         {#each [
           { key: "home", label: "รายการอาหาร", icon: Home },
           { key: "checkout", label: "ตะกร้าสั่งซื้อ", icon: ShoppingCart, badge: count },
-          { key: "tracking", label: "สถานะออเดอร์", icon: Timer }, 
+          { key: "tracking", label: "สถานะออเดอร์", icon: Timer },
           { key: "history", label: "ประวัติการสั่ง", icon: History },
         ] as t}
           {@const active = screen === t.key}
           {@const IconComp = t.icon}
           <button
             onclick={() => handleNav(t.key as Screen)}
-            class={`relative flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
+            class={`relative flex items-center gap-1.5 px-2.5 lg:px-3 py-2 rounded-lg text-[11px] lg:text-xs font-bold whitespace-nowrap transition ${
               active ? "bg-white text-emerald-600 shadow-sm" : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
             }`}
           >
-            <IconComp class="w-4 h-4" />
-            <span>{t.label}</span>
+            <IconComp class="w-4 h-4 shrink-0" />
+            <span class="whitespace-nowrap">{t.label}</span>
             {#if t.badge && t.badge > 0}
-              <span class="bg-emerald-500 text-white text-[10px] px-1.5 py-0.2 rounded-full font-extrabold tabnum leading-tight">
+              <span class="bg-emerald-500 text-white text-[10px] px-1.5 py-0.5 rounded-full font-extrabold tabnum leading-none shrink-0">
                 {t.badge}
               </span>
             {/if}
@@ -328,28 +651,38 @@
         {/each}
       </nav>
 
-      <!-- Auth Button Area -->
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 shrink-0">
         {#if isAuthenticated}
+          <div class="hidden 2xl:flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-2.5 py-1.5 rounded-xl shrink-0">
+            <div class="h-7 w-7 rounded-full bg-emerald-500 grid place-items-center text-white shrink-0">
+              <UserCircle class="w-4 h-4" />
+            </div>
+            <div class="flex flex-col min-w-0">
+              <span class="text-[10px] font-bold text-emerald-700 leading-tight whitespace-nowrap">{currentUserName}</span>
+              <span class="text-[9px] text-emerald-500 leading-tight whitespace-nowrap">{currentUserId}</span>
+            </div>
+          </div>
           <button
-            onclick={() => { isAuthenticated = false; screen = "home"; showToast("ออกจากระบบเรียบร้อยแล้ว"); }}
-            class="flex items-center gap-2 text-xs font-bold text-slate-600 bg-slate-100 px-3.5 py-2 rounded-xl hover:bg-slate-200 hover:text-slate-800 transition border border-slate-200/80"
+            onclick={handleLogout}
+            class="flex items-center gap-1.5 text-[11px] lg:text-xs font-bold text-slate-600 bg-slate-100 px-3 py-2 rounded-xl hover:bg-slate-200 transition border border-slate-200/80 whitespace-nowrap shrink-0"
+            title="ออกจากระบบ"
           >
-            <GraduationCap class="w-4 h-4 text-emerald-600" /> ออกจากระบบ
+            <GraduationCap class="w-4 h-4 text-emerald-600 shrink-0" />
+            <span class="hidden lg:inline whitespace-nowrap">ออกจากระบบ</span>
           </button>
         {:else}
           <button
             onclick={() => (showLogin = true)}
-            class="flex items-center gap-2 text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-4 py-2 rounded-xl hover:bg-emerald-100 transition shadow-sm"
+            class="flex items-center gap-1.5 text-[11px] lg:text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-2 rounded-xl hover:bg-emerald-100 transition shadow-sm whitespace-nowrap shrink-0"
           >
-            <LogIn class="w-4 h-4" /> เข้าสู่ระบบ
+            <LogIn class="w-4 h-4 shrink-0" />
+            <span class="hidden sm:inline whitespace-nowrap">เข้าสู่ระบบ</span>
           </button>
         {/if}
       </div>
     </div>
   </header>
 
-  <!-- Notification Toast -->
   {#if toast}
     <div transition:fly={{ y: -30, duration: 200 }} class="fixed top-20 left-1/2 -translate-x-1/2 z-[70] max-w-sm w-[90%] bg-slate-900/95 text-white text-xs font-medium px-4 py-3 rounded-2xl shadow-2xl backdrop-blur flex items-center gap-2.5">
       <CheckCircle2 class="w-4 h-4 text-emerald-400 shrink-0" />
@@ -357,12 +690,19 @@
     </div>
   {/if}
 
-  <!-- Main Container -->
-  <main class="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 pb-28 md:pb-12">
-    <!-- HOME SCREEN -->
+  {#if !isOnline}
+    <div class="bg-amber-50 border-b border-amber-200">
+      <div class="max-w-7xl mx-auto px-4 py-2 flex items-center gap-2 text-xs text-amber-700 font-medium">
+        <WifiOff class="w-4 h-4 shrink-0" />
+        <span>คุณกำลังออฟไลน์อยู่ · สามารถดูเมนูและเวลาที่เหลือได้ แต่ไม่สามารถส่ง/ติดตามออเดอร์แบบ Realtime ได้</span>
+      </div>
+    </div>
+  {/if}
+
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 pb-28 md:pb-12">
+    <!-- HOME -->
     {#if screen === "home"}
       <div in:fade={{ duration: 150 }} class="space-y-6">
-        <!-- Search & Filter Bar -->
         <div class="relative max-w-xl mx-auto md:mx-0">
           <Search class="w-5 h-5 text-slate-400 absolute left-4 top-1/2 -translate-y-1/2" />
           <input
@@ -373,9 +713,77 @@
         </div>
 
         {#if !query}
-          <!-- Store Selector -->
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200/80 p-4">
+              <h3 class="text-xs font-extrabold text-slate-700 uppercase flex items-center gap-1.5 mb-3">
+                <Flame class="w-4 h-4 text-orange-500" /> เมนูยอดนิยม
+              </h3>
+              <div class="space-y-2">
+                {#each topMenus as m, idx (m.id)}
+                  <div class="flex items-center gap-2 py-1.5 border-b border-slate-100 last:border-0">
+                    <span class={`h-6 w-6 rounded-full grid place-items-center text-[10px] font-black ${
+                      idx === 0 ? "bg-yellow-400 text-white" : idx === 1 ? "bg-slate-300 text-white" : "bg-orange-300 text-white"
+                    }`}>{idx + 1}</span>
+                    <span class="text-lg">{m.emoji}</span>
+                    <div class="flex-1 min-w-0">
+                      <p class="text-xs font-bold text-slate-700 truncate">{m.name}</p>
+                      <p class="text-[10px] text-orange-500 font-bold">🔥 {m.popularity}% นิยม</p>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            </div>
+
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200/80 p-4">
+              <h3 class="text-xs font-extrabold text-slate-700 uppercase flex items-center gap-1.5 mb-3">
+                <Rocket class="w-4 h-4 text-purple-500" /> ร้านเปิดใหม่
+              </h3>
+              {#if newStores.length > 0}
+                <div class="space-y-2">
+                  {#each newStores as s (s.id)}
+                    <div class="flex items-center gap-2 py-1.5">
+                      <span class="text-lg">{s.emoji}</span>
+                      <div class="flex-1 min-w-0">
+                        <p class="text-xs font-bold text-slate-700 truncate">{s.name}</p>
+                        <p class="text-[10px] text-purple-600 font-bold">🆕 NEW</p>
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <div class="py-4 text-center">
+                  <p class="text-xs text-slate-400">ยังไม่มีร้านใหม่ตอนนี้</p>
+                </div>
+              {/if}
+            </div>
+
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200/80 p-4">
+              <h3 class="text-xs font-extrabold text-slate-700 uppercase flex items-center gap-1.5 mb-3">
+                <TrendingUp class="w-4 h-4 text-red-500" /> ร้านค้ามาแรง
+              </h3>
+              {#if trendingStores.length > 0}
+                <div class="space-y-2">
+                  {#each trendingStores as s (s.id)}
+                    <div class="flex items-center gap-2 py-1.5">
+                      <span class="text-lg">{s.emoji}</span>
+                      <div class="flex-1 min-w-0">
+                        <p class="text-xs font-bold text-slate-700 truncate">{s.name}</p>
+                        <p class="text-[10px] text-red-500 font-bold">⚡ Trending</p>
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <div class="py-4 text-center">
+                  <p class="text-xs text-slate-400">ยังไม่มีร้านมาแรงตอนนี้</p>
+                </div>
+              {/if}
+            </div>
+          </div>
+
           <div class="flex gap-3 overflow-x-auto no-scrollbar pb-1">
             {#each STORES as s (s.id)}
+              {@const st = storeStats[s.id]}
               <button
                 onclick={() => (activeStoreId = s.id)}
                 class={`shrink-0 flex items-center gap-3 px-4 py-3 rounded-2xl border text-left transition ${
@@ -386,13 +794,25 @@
               >
                 <span class="text-2xl">{s.emoji}</span>
                 <div>
-                  <p class={`text-xs sm:text-sm font-bold leading-tight ${activeStoreId === s.id ? "text-white" : "text-slate-800"}`}>
-                    {s.name}
-                  </p>
+                  <div class="flex items-center gap-1">
+                    <p class={`text-xs sm:text-sm font-bold leading-tight whitespace-nowrap ${activeStoreId === s.id ? "text-white" : "text-slate-800"}`}>
+                      {s.name}
+                    </p>
+                    {#if s.isNew}
+                      <span class="text-[8px] bg-purple-500 text-white px-1 py-0.5 rounded font-black">NEW</span>
+                    {/if}
+                    {#if s.trending}
+                      <span class="text-[8px] bg-red-500 text-white px-1 py-0.5 rounded font-black">🔥</span>
+                    {/if}
+                  </div>
                   <div class="flex items-center gap-1.5 mt-1">
                     <Star class={`w-3 h-3 ${activeStoreId === s.id ? "text-white fill-white" : "text-amber-400 fill-amber-400"}`} />
                     <span class={`text-[10px] font-semibold ${activeStoreId === s.id ? "text-emerald-50" : "text-slate-400"}`}>
                       {s.rating}
+                    </span>
+                    <span class={`text-[10px] font-semibold ${activeStoreId === s.id ? "text-emerald-50" : "text-slate-400"}`}>·</span>
+                    <span class={`text-[10px] font-bold ${activeStoreId === s.id ? "text-white" : "text-emerald-600"}`}>
+                      ⚡ {st.total} ออเดอร์สด
                     </span>
                   </div>
                 </div>
@@ -400,7 +820,6 @@
             {/each}
           </div>
 
-          <!-- Active Store Banner -->
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 overflow-hidden">
             <div class="bg-gradient-to-r from-emerald-500 via-emerald-600 to-teal-600 p-5 sm:p-6 text-white flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div class="flex items-center gap-3.5">
@@ -412,10 +831,11 @@
                   <p class="text-xs sm:text-sm text-emerald-50/90 mt-0.5">{activeStore.lock} · {activeStore.location}</p>
                 </div>
               </div>
-              <span class="text-xs font-bold bg-white/20 backdrop-blur border border-white/20 px-3 py-1.5 rounded-full">
+              <span class="text-xs font-bold bg-white/20 backdrop-blur border border-white/20 px-3 py-1.5 rounded-full whitespace-nowrap">
                 เปิดให้บริการ
               </span>
             </div>
+
             <div class="grid grid-cols-3 divide-x divide-slate-100 bg-white py-3">
               <div class="flex flex-col items-center gap-0.5">
                 <span class="flex items-center gap-1 text-sm sm:text-base font-extrabold text-slate-800">
@@ -431,21 +851,32 @@
               </div>
               <div class="flex flex-col items-center gap-0.5">
                 <span class="flex items-center gap-1 text-sm sm:text-base font-extrabold text-slate-800">
-                  <Users class="w-4 h-4 text-orange-500" /> {activeStore.queue} คิว
+                  <Users class="w-4 h-4 text-orange-500" /> {storeStats[activeStoreId].active} คิว
                 </span>
-                <span class="text-[11px] text-slate-400 font-medium">คิวข้างหน้า</span>
+                <span class="text-[11px] text-slate-400 font-medium">กำลังสั่ง/ปรุง</span>
               </div>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2 bg-slate-50 border-t border-slate-100 px-5 py-3">
+              <span class="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-600 bg-white border border-slate-200 rounded-full px-3 py-1.5">
+                <Users class="w-3.5 h-3.5 text-orange-500" /> ลูกค้ากำลังสั่ง: {storeStats[activeStoreId].active}
+              </span>
+              <span class="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-600 bg-white border border-slate-200 rounded-full px-3 py-1.5">
+                <Receipt class="w-3.5 h-3.5 text-emerald-500" /> ออเดอร์ทั้งหมด: {storeStats[activeStoreId].total}
+              </span>
+              <span class="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-600 bg-white border border-slate-200 rounded-full px-3 py-1.5">
+                <CheckCircle2 class="w-3.5 h-3.5 text-emerald-500" /> พร้อมรับ: {storeStats[activeStoreId].ready}
+              </span>
             </div>
           </div>
         {/if}
 
-        <!-- Menu Section Header -->
         <div class="flex items-center justify-between pt-2">
           <h3 class="flex items-center gap-2 text-sm sm:text-base font-extrabold text-slate-800 uppercase tracking-wide">
             <Sparkles class="w-4 h-4 text-emerald-500" />
             {query ? "ผลการค้นหาเมนู" : `เมนูของ ${activeStore.name}`}
           </h3>
-          <span class="text-xs text-slate-400">พบ {filteredMenu.length} รายการ</span>
+          <span class="text-xs text-slate-400 whitespace-nowrap">พบ {filteredMenu.length} รายการ</span>
         </div>
 
         {#if filteredMenu.length === 0}
@@ -455,7 +886,6 @@
           </div>
         {/if}
 
-        <!-- Menu Responsive Grid -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {#each filteredMenu as m (m.id)}
             {@const totalQty = cart.filter((c) => c.itemId === m.id).reduce((s, c) => s + c.qty, 0)}
@@ -478,6 +908,24 @@
                   {/if}
                   <h4 class="text-sm font-bold text-slate-800 leading-snug truncate">{m.name}</h4>
                   <p class="text-xs text-slate-400 leading-snug mt-1 line-clamp-2">{m.desc}</p>
+
+                  <div class="flex flex-wrap items-center gap-1.5 mt-2">
+                    {#if m.prepTime}
+                      <span class="text-[10px] text-emerald-700 font-bold bg-emerald-50 border border-emerald-100 px-2 py-0.5 rounded flex items-center gap-1">
+                        <Clock class="w-2.5 h-2.5" /> {m.prepTime}
+                      </span>
+                    {/if}
+                    {#if m.calories}
+                      <span class="text-[10px] text-orange-700 font-bold bg-orange-50 border border-orange-100 px-2 py-0.5 rounded flex items-center gap-1">
+                        <Flame class="w-2.5 h-2.5" /> {m.calories} kcal
+                      </span>
+                    {/if}
+                    {#if m.popularity}
+                      <span class="text-[10px] text-red-600 font-bold bg-red-50 border border-red-100 px-2 py-0.5 rounded">
+                        🔥 {m.popularity}%
+                      </span>
+                    {/if}
+                  </div>
                 </div>
                 <div class="flex items-center justify-between mt-3 pt-2 border-t border-slate-100">
                   <span class="text-base font-extrabold text-emerald-600 tabnum">
@@ -497,10 +945,23 @@
             </div>
           {/each}
         </div>
+
+        {#if !query && filteredMenu.length > 0}
+          <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-5">
+            <ReviewList
+              {reviews}
+              currentUserId={currentUserId}
+              onEdit={handleEditReview}
+              onDelete={handleDeleteReview}
+              onReport={handleReportReview}
+              storeFilter={activeStoreId}
+            />
+          </div>
+        {/if}
       </div>
     {/if}
 
-    <!-- CHECKOUT SCREEN -->
+    <!-- CHECKOUT -->
     {#if screen === "checkout"}
       <div in:fade={{ duration: 150 }} class="max-w-2xl mx-auto space-y-5">
         <div class="flex items-center gap-3">
@@ -510,17 +971,25 @@
           <h2 class="text-lg font-extrabold text-slate-800">ยืนยันคำสั่งซื้อของคุณ</h2>
         </div>
 
+        {#if !isOnline}
+          <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3">
+            <WifiOff class="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p class="text-xs font-bold text-amber-800">ออฟไลน์อยู่</p>
+              <p class="text-[11px] text-amber-700 mt-0.5">กรุณาเชื่อมต่ออินเทอร์เน็ตเพื่อยืนยันการสั่งซื้อ</p>
+            </div>
+          </div>
+        {/if}
+
         {#if count === 0}
           <div class="bg-white rounded-3xl border border-dashed border-slate-200 py-16 text-center px-6">
             <ShoppingCart class="w-12 h-12 text-slate-300 mx-auto mb-3" />
             <p class="text-base font-bold text-slate-700">ไม่มีรายการอาหารในตะกร้า</p>
-            <p class="text-xs text-slate-400 mt-1 mb-5">เลือกสั่งเมนูอาหารอร่อยจากร้านโปรดในโรงอาหารได้เลย</p>
-            <button onclick={() => (screen = "home")} class="bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold px-6 py-3 rounded-xl shadow-lg shadow-emerald-500/30 transition">
+            <button onclick={() => (screen = "home")} class="mt-4 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold px-6 py-3 rounded-xl shadow-lg shadow-emerald-500/30 transition">
               กลับไปเลือกเมนู
             </button>
           </div>
         {:else}
-          <!-- Cart Items Summary -->
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-5">
             <h3 class="flex items-center gap-2 text-xs font-extrabold text-slate-700 uppercase tracking-wide mb-4">
               <Receipt class="w-4 h-4 text-emerald-500" /> รายการที่เลือกสั่ง
@@ -532,6 +1001,14 @@
                   <div class="flex-1 min-w-0">
                     <p class="text-sm font-bold text-slate-800 truncate">{l.item.name}</p>
                     <p class="text-xs text-emerald-600 font-medium mb-1">{l.store.name}</p>
+                    <div class="flex flex-wrap gap-1 mb-1">
+                      {#if l.item.prepTime}
+                        <span class="text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">⏱️ {l.item.prepTime}</span>
+                      {/if}
+                      {#if l.item.calories}
+                        <span class="text-[10px] text-orange-700 bg-orange-50 px-1.5 py-0.5 rounded">🔥 {l.item.calories} kcal</span>
+                      {/if}
+                    </div>
                     {#if l.option}
                       <span class="text-[11px] text-amber-700 font-semibold bg-amber-50 px-2 py-0.5 rounded inline-block mb-1">{l.option}</span>
                     {/if}
@@ -560,9 +1037,6 @@
               <div class="flex justify-between text-xs text-slate-500">
                 <span>ยอดรวมค่าอาหาร</span><span class="tabnum font-semibold text-slate-700">{money(subtotal)}</span>
               </div>
-              <div class="flex justify-between text-xs text-slate-500">
-                <span>ส่วนลดนักศึกษา SPU</span><span class="tabnum font-semibold text-emerald-600">- ฿0.00</span>
-              </div>
               <div class="flex justify-between items-end pt-2 border-t border-slate-100">
                 <span class="text-sm font-bold text-slate-800">ยอดชำระสุทธิ</span>
                 <span class="text-2xl font-black text-emerald-600 tabnum leading-none">{money(total)}</span>
@@ -570,7 +1044,6 @@
             </div>
           </div>
 
-          <!-- Time Slot Selection -->
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-5">
             <h3 class="flex items-center gap-2 text-xs font-extrabold text-slate-700 uppercase tracking-wide mb-3">
               <Timer class="w-4 h-4 text-emerald-500" /> เวลานัดรับอาหาร (Time Slot)
@@ -579,10 +1052,8 @@
               {#each SLOTS as s}
                 <button
                   onclick={() => (slot = s)}
-                  class={`h-11 rounded-xl text-xs font-bold transition border tabnum active:scale-95 ${
-                    slot === s
-                      ? "bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-500/25"
-                      : "bg-slate-50 text-slate-700 border-slate-200 hover:border-emerald-300"
+                  class={`h-11 rounded-xl text-xs font-bold transition border tabnum active:scale-95 whitespace-nowrap ${
+                    slot === s ? "bg-emerald-500 text-white border-emerald-500 shadow-md" : "bg-slate-50 text-slate-700 border-slate-200 hover:border-emerald-300"
                   }`}
                 >
                   {s}
@@ -591,39 +1062,38 @@
             </div>
           </div>
 
-          <!-- Order Note -->
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-5">
             <h3 class="flex items-center gap-2 text-xs font-extrabold text-slate-700 uppercase tracking-wide mb-3">
-              <MessageSquare class="w-4 h-4 text-emerald-500" /> หมายเหตุเพิ่มเติมถึงร้านค้า
+              <MessageSquare class="w-4 h-4 text-emerald-500" /> หมายเหตุเพิ่มเติม
             </h3>
             <div class="relative">
               <PenLine class="w-4 h-4 text-slate-400 absolute left-4 top-1/2 -translate-y-1/2" />
               <input
                 bind:value={orderNote}
-                placeholder="เช่น ไม่ใส่ผัก, เผ็ดน้อย, ขอช้อนส้อม..."
-                class="w-full h-11 pl-11 pr-4 rounded-xl bg-slate-50 border border-slate-200 text-xs placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400/50 focus:border-emerald-500 transition"
+                placeholder="เช่น ไม่ใส่ผัก, เผ็ดน้อย..."
+                class="w-full h-11 pl-11 pr-4 rounded-xl bg-slate-50 border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-400/50"
               />
             </div>
           </div>
 
-          <!-- Payment Section -->
+          <!-- ===== ช่องทางชำระเงิน ===== -->
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-5">
             <h3 class="flex items-center gap-2 text-xs font-extrabold text-slate-700 uppercase tracking-wide mb-3">
-              <QrCode class="w-4 h-4 text-emerald-500" /> เลือกช่องทางชำระเงิน
+              <QrCode class="w-4 h-4 text-emerald-500" /> ช่องทางชำระเงิน
             </h3>
             <div class="grid grid-cols-2 gap-3 mb-4">
               <button
                 onclick={() => (payMethod = "promptpay")}
-                class={`h-12 rounded-xl text-xs font-bold border flex items-center justify-center gap-2 transition ${
-                  payMethod === "promptpay" ? "bg-emerald-50 border-emerald-500 text-emerald-700" : "bg-slate-50 border-slate-200 text-slate-600"
+                class={`h-12 rounded-xl text-xs font-bold border flex items-center justify-center gap-2 transition whitespace-nowrap ${
+                  payMethod === "promptpay" ? "bg-emerald-50 border-emerald-500 text-emerald-700" : "bg-slate-50 border-slate-200"
                 }`}
               >
                 <QrCode class="w-4 h-4" /> QR PromptPay
               </button>
               <button
                 onclick={() => (payMethod = "banking")}
-                class={`h-12 rounded-xl text-xs font-bold border flex items-center justify-center gap-2 transition ${
-                  payMethod === "banking" ? "bg-emerald-50 border-emerald-500 text-emerald-700" : "bg-slate-50 border-slate-200 text-slate-600"
+                class={`h-12 rounded-xl text-xs font-bold border flex items-center justify-center gap-2 transition whitespace-nowrap ${
+                  payMethod === "banking" ? "bg-emerald-50 border-emerald-500 text-emerald-700" : "bg-slate-50 border-slate-200"
                 }`}
               >
                 <Smartphone class="w-4 h-4" /> Mobile Banking
@@ -632,88 +1102,121 @@
 
             {#if payMethod === "promptpay"}
               <div class="rounded-2xl border border-slate-200 bg-slate-50 p-5 flex flex-col items-center">
-                <div class="bg-white rounded-2xl p-3 shadow-sm border border-slate-200/80 max-w-[220px] w-full flex justify-center">
-                  <!-- ดึงรูป QR Code จริงจาก public/qrcode.webp -->
-                  <img
-                    src="/qrcode.webp"
-                    alt="QR Code สำหรับสแกนจ่ายเงิน SPU Canteen"
-                    class="w-full h-auto object-contain rounded-xl"
-                  />
+                <div class="bg-white rounded-2xl p-3 shadow-sm max-w-[220px] w-full flex justify-center">
+                  <img src="/qrcode.webp" alt="QR" class="w-full h-auto object-contain rounded-xl" />
                 </div>
-                <div class="mt-3 text-center">
-                  <p class="text-xs font-bold text-slate-700">สแกนชำระเงิน: SPU Canteen Center</p>
-                  <p class="text-xl font-black text-emerald-600 tabnum mt-0.5">{money(total)}</p>
-                  <p class="text-[10px] text-slate-400 mt-0.5">รองรับทุกแอปพลิเคชันธนาคาร (PromptPay)</p>
-                </div>
+                <p class="text-xl font-black text-emerald-600 tabnum mt-3">{money(total)}</p>
               </div>
             {:else}
-              <div class="rounded-2xl border border-slate-200 bg-slate-50 p-3 space-y-2">
-                {#each ["ธนาคารกสิกรไทย (K PLUS)", "ธนาคารไทยพาณิชย์ (SCB EASY)", "ธนาคารกรุงไทย (KTB NEXT)"] as b}
-                  <div class="flex items-center justify-between bg-white rounded-xl px-4 py-3 border border-slate-100 shadow-sm">
-                    <span class="text-xs font-semibold text-slate-700">{b}</span>
-                    <ChevronRight class="w-4 h-4 text-slate-400" />
-                  </div>
+              <!-- ⬇️ ใหม่: รายชื่อธนาคารแบบคลิกเลือกได้ -->
+              <div class="rounded-2xl bg-slate-50 p-3 space-y-2">
+                {#if !selectedBank}
+                  <p class="text-[10px] font-bold text-slate-400 px-1 pb-0.5">แตะเพื่อเลือกธนาคารที่ต้องการชำระเงิน</p>
+                {/if}
+                {#each BANKS as b (b.id)}
+                  {@const selected = selectedBank === b.id}
+                  <button
+                    onclick={() => selectBank(b)}
+                    class={`w-full flex items-center justify-between gap-3 rounded-xl px-4 py-3 border text-left transition ${
+                      selected
+                        ? "bg-emerald-50 border-emerald-500 shadow-sm ring-2 ring-emerald-500/20"
+                        : "bg-white border-slate-100 shadow-sm hover:border-emerald-300 hover:bg-emerald-50/40 active:scale-[0.99]"
+                    }`}
+                    aria-pressed={selected}
+                  >
+                    <span class="flex items-center gap-2.5 min-w-0">
+                      <span class={`h-8 w-8 rounded-lg grid place-items-center shrink-0 ${
+                        selected ? "bg-emerald-500 text-white" : "bg-slate-100 text-slate-500"
+                      }`}>
+                        {#if selected}
+                          <CheckCircle2 class="w-4 h-4" />
+                        {:else}
+                          <Smartphone class="w-4 h-4" />
+                        {/if}
+                      </span>
+                      <span class="min-w-0">
+                        <span class={`block text-xs font-semibold truncate ${selected ? "text-emerald-700" : "text-slate-700"}`}>
+                          {b.name}
+                        </span>
+                        <span class="block text-[10px] text-slate-400">{b.app}</span>
+                      </span>
+                    </span>
+                    <ChevronRight class={`w-4 h-4 shrink-0 ${selected ? "text-emerald-500" : "text-slate-400"}`} />
+                  </button>
                 {/each}
               </div>
             {/if}
           </div>
 
+          <!-- ⬇️ ปุ่มยืนยัน: บังคับเลือกธนาคารเมื่อใช้ Mobile Banking -->
           <button
             onclick={confirmOrder}
-            disabled={paying}
-            class="w-full h-14 rounded-2xl font-bold text-sm sm:text-base flex items-center justify-center gap-2.5 transition bg-emerald-500 hover:bg-emerald-600 active:scale-98 text-white shadow-xl shadow-emerald-500/30 disabled:bg-slate-200 disabled:text-slate-400"
+            disabled={paying || !isOnline || (payMethod === "banking" && !selectedBank)}
+            class="w-full h-14 rounded-2xl font-bold text-sm flex items-center justify-center gap-2.5 transition bg-emerald-500 hover:bg-emerald-600 active:scale-98 text-white shadow-xl shadow-emerald-500/30 disabled:bg-slate-200 disabled:text-slate-400"
           >
             {#if paying}
-              <Loader2 class="w-5 h-5 animate-spin" />
-              กำลังดำเนินการสั่งซื้อ...
+              <Loader2 class="w-5 h-5 animate-spin" /> กำลังดำเนินการ...
+            {:else if !isOnline}
+              <WifiOff class="w-5 h-5" /> ออฟไลน์ - ไม่สามารถสั่งซื้อได้
+            {:else if payMethod === "banking" && !selectedBank}
+              <Smartphone class="w-5 h-5" /> กรุณาเลือกธนาคารด้านบน
+            {:else if payMethod === "banking" && selectedBankObj}
+              ยืนยันการสั่งซื้อผ่าน {selectedBankObj.app} · {money(total)}
             {:else}
-              ยืนยันการสั่งซื้อและชำระเงิน · {money(total)}
+              ยืนยันการสั่งซื้อ · {money(total)}
             {/if}
           </button>
         {/if}
       </div>
     {/if}
 
-    <!-- TRACKING SCREEN --> 
+    <!-- TRACKING -->
     {#if screen === "tracking"}
       <div in:fade={{ duration: 150 }} class="max-w-2xl mx-auto space-y-5">
         {#if !order}
           <div class="bg-white rounded-3xl border border-dashed border-slate-200 py-16 text-center px-6">
             <Timer class="w-12 h-12 text-slate-300 mx-auto mb-3" />
-            <p class="text-base font-bold text-slate-700">ยังไม่มีรายการสั่งอาหารที่กำลังดำเนินการ</p>
-            <button onclick={() => (screen = "home")} class="mt-4 bg-emerald-500 text-white text-xs font-bold px-6 py-3 rounded-xl shadow-lg shadow-emerald-500/25">
-              เริ่มสั่งอาหารทันที
+            <p class="text-base font-bold text-slate-700">ยังไม่มีออเดอร์ที่กำลังดำเนินการ</p>
+            <button onclick={() => (screen = "home")} class="mt-4 bg-emerald-500 text-white text-xs font-bold px-6 py-3 rounded-xl">
+              เริ่มสั่งอาหาร
             </button>
           </div>
         {:else}
-          {#if order.status === 2}
-            <div transition:slide class="bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-3xl p-4 sm:p-5 shadow-lg flex items-start gap-3">
-              <div class="h-10 w-10 rounded-2xl bg-white/20 grid place-items-center shrink-0">
-                <Bell class="w-5 h-5" />
+          {#if !isOnline}
+            <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3">
+              <WifiOff class="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <p class="text-xs font-bold text-amber-800">ออฟไลน์อยู่</p>
+                <p class="text-[11px] text-amber-700 mt-0.5">ไม่สามารถอัปเดตสถานะแบบ Realtime ได้ เวลานับถอยหลังเป็นการประมาณการ</p>
               </div>
-              <div class="flex-1">
-                <p class="text-sm font-black leading-snug">🔔 อาหารของคุณพร้อมรับแล้ว!</p>
-                <p class="text-xs text-emerald-50 leading-snug mt-0.5">คำสั่งซื้อ {order.id} (รหัส {order.code}) สามารถนำรหัสไปรับได้ที่ช่องบริการ</p>
-              </div>
-            </div> 
+            </div>
           {/if}
 
-          <!-- Pickup Ticket Code -->
+          {#if order.status === 2}
+            <div transition:slide class="bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-3xl p-5 shadow-lg flex items-start gap-3">
+              <Bell class="w-5 h-5 shrink-0 mt-0.5" />
+              <div>
+                <p class="text-sm font-black">🔔 อาหารพร้อมรับแล้ว!</p>
+                <p class="text-xs text-emerald-50 mt-0.5">รหัส {order.code} - รับที่ช่องบริการด่วน 2</p>
+              </div>
+            </div>
+          {/if}
+
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-5 sm:p-6">
             <div class="flex items-center justify-between">
               <div>
                 <p class="text-[11px] text-slate-400 font-bold uppercase tracking-wider">หมายเลขคำสั่งซื้อ</p>
                 <span class="text-base font-black text-slate-800 tabnum">{order.id}</span>
               </div>
-              <span class={`text-xs font-bold px-3 py-1.5 rounded-full ${
+              <span class={`text-xs font-bold px-3 py-1.5 rounded-full whitespace-nowrap ${
                 order.status === 2 ? "bg-emerald-100 text-emerald-700" : order.status === 1 ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-600"
               }`}>
-                {order.status === 0 ? "รับออเดอร์แล้ว" : order.status === 1 ? "กำลังปรุงอาหาร" : "พร้อมรับอาหาร"}
+                {order.status === 0 ? "รับออเดอร์แล้ว" : order.status === 1 ? "กำลังปรุง" : "พร้อมรับ"}
               </span>
             </div>
 
-            <div class="mt-4 rounded-3xl bg-slate-900 p-6 text-center text-white relative overflow-hidden shadow-inner">
-              <p class="text-xs text-slate-400 font-semibold tracking-wide">รหัสรับอาหารของคุณ</p>
+            <div class="mt-4 rounded-3xl bg-slate-900 p-6 text-center text-white shadow-inner">
+              <p class="text-xs text-slate-400 font-semibold">รหัสรับอาหาร</p>
               <p class="text-5xl sm:text-6xl font-black text-emerald-400 leading-none tracking-tight tabnum mt-2">{order.code}</p>
             </div>
 
@@ -722,106 +1225,88 @@
                 {#each order.items as i}
                   <div class="text-xs text-slate-700 font-medium">
                     <span class="text-slate-400">[{i.storeName}]</span> {i.name} ×{i.qty}
-                    {#if i.option}
-                      <span class="text-amber-600 ml-1">({i.option})</span>
-                    {/if}
-                    {#if i.note}
-                      <span class="text-slate-400 block ml-4 italic">โน้ต: {i.note}</span>
-                    {/if}
+                    {#if i.option}<span class="text-amber-600 ml-1">({i.option})</span>{/if}
                   </div>
                 {/each}
               </div>
-              <div class="pt-2 flex justify-between items-center text-xs text-slate-500">
+              <div class="pt-2 flex justify-between text-xs text-slate-500">
                 <span>เวลานัดรับ</span>
-                <span class="font-bold text-emerald-600 tabnum text-sm">{order.slot}</span>
+                <span class="font-bold text-emerald-600 tabnum">{order.slot}</span>
               </div>
+            </div>
+
+            <div class="mt-3 flex flex-wrap gap-2">
+              {#each myOrderStoreIds as sid}
+                {@const st = storeStats[sid]}
+                {@const stName = STORES.find(s => s.id === sid)?.name ?? sid}
+                <span class="text-[10px] font-bold bg-slate-50 border border-slate-200 rounded-full px-2.5 py-1 text-slate-600 whitespace-nowrap">
+                  {stName}: กำลังสั่ง {st.active} · พร้อมรับ {st.ready}
+                </span>
+              {/each}
             </div>
           </div>
 
-          <!-- Progress Timeline -->
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-5 sm:p-6">
-            <h3 class="flex items-center gap-2 text-xs font-extrabold text-slate-700 uppercase tracking-wide mb-4">
-              <Zap class="w-4 h-4 text-emerald-500" /> สถานะคิวอาหารแบบเรียลไทม์
+            <h3 class="flex items-center gap-2 text-xs font-extrabold text-slate-700 uppercase mb-4">
+              <Zap class="w-4 h-4 text-emerald-500" /> สถานะคิว {#if !isOnline}<span class="text-[9px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded">OFFLINE</span>{/if}
             </h3>
             <div class="relative flex justify-between my-4">
               <div class="absolute left-[16.6%] right-[16.6%] top-5 h-1 bg-slate-100 rounded-full"></div>
-              <div class="absolute left-[16.6%] top-5 h-1 bg-emerald-500 rounded-full transition-all duration-300" style={`width: ${(order.status / 2) * 66.8}%`}></div>
+              <div class="absolute left-[16.6%] top-5 h-1 bg-emerald-500 rounded-full transition-all" style={`width: ${(order.status / 2) * 66.8}%`}></div>
 
               <div class="flex flex-col items-center gap-2 z-10 w-1/3">
                 <div class={`h-11 w-11 rounded-full grid place-items-center border-2 transition ${order.status >= 0 ? "bg-emerald-500 border-emerald-500 text-white" : "bg-white border-slate-200 text-slate-300"}`}>
                   <Receipt class="w-5 h-5" />
                 </div>
-                <span class={`text-xs font-bold ${order.status >= 0 ? "text-emerald-700" : "text-slate-400"}`}>รับออเดอร์</span>
+                <span class={`text-xs font-bold whitespace-nowrap ${order.status >= 0 ? "text-emerald-700" : "text-slate-400"}`}>รับออเดอร์</span>
               </div>
-
               <div class="flex flex-col items-center gap-2 z-10 w-1/3">
                 <div class={`h-11 w-11 rounded-full grid place-items-center border-2 transition ${order.status >= 1 ? "bg-emerald-500 border-emerald-500 text-white" : "bg-white border-slate-200 text-slate-300"}`}>
                   <ChefHat class="w-5 h-5" />
                 </div>
-                <span class={`text-xs font-bold ${order.status >= 1 ? "text-emerald-700" : "text-slate-400"}`}>กำลังปรุง</span>
+                <span class={`text-xs font-bold whitespace-nowrap ${order.status >= 1 ? "text-emerald-700" : "text-slate-400"}`}>กำลังปรุง</span>
               </div>
-
               <div class="flex flex-col items-center gap-2 z-10 w-1/3">
                 <div class={`h-11 w-11 rounded-full grid place-items-center border-2 transition ${order.status >= 2 ? "bg-emerald-500 border-emerald-500 text-white" : "bg-white border-slate-200 text-slate-300"}`}>
                   <CheckCircle2 class="w-5 h-5" />
                 </div>
-                <span class={`text-xs font-bold ${order.status >= 2 ? "text-emerald-700" : "text-slate-400"}`}>พร้อมรับ</span>
+                <span class={`text-xs font-bold whitespace-nowrap ${order.status >= 2 ? "text-emerald-700" : "text-slate-400"}`}>พร้อมรับ</span>
               </div>
             </div>
 
             <button
               onclick={advanceStatus}
-              disabled={order.status === 2}
-              class={`mt-2 w-full h-10 rounded-xl border-2 border-dashed text-xs font-bold transition ${
-                order.status === 2 ? "border-slate-200 text-slate-300 cursor-not-allowed" : "border-emerald-300 text-emerald-600 hover:bg-emerald-50"
+              disabled={order.status === 2 || !isOnline}
+              class={`mt-2 w-full h-10 rounded-xl border-2 border-dashed text-xs font-bold transition whitespace-nowrap ${
+                order.status === 2 || !isOnline ? "border-slate-200 text-slate-300 cursor-not-allowed" : "border-emerald-300 text-emerald-600 hover:bg-emerald-50"
               }`}
             >
               <Zap class="w-3.5 h-3.5 inline mr-1" />
-              {order.status === 2 ? "ออเดอร์เสร็จสมบูรณ์แล้ว" : "[Simulate Next Status] จำลองสถานะถัดไป"}
+              {!isOnline ? "ออฟไลน์ - ไม่สามารถอัปเดตได้" : order.status === 2 ? "เสร็จสมบูรณ์" : "[Simulate] จำลองสถานะถัดไป"}
             </button>
           </div>
 
-          <!-- Countdown and Pick up Map -->
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-5">
-            <h3 class="flex items-center gap-2 text-xs font-extrabold text-slate-700 uppercase tracking-wide mb-3">
-              <Timer class="w-4 h-4 text-emerald-500" /> เวลานับถอยหลังโดยประมาณ
+            <h3 class="flex items-center gap-2 text-xs font-extrabold text-slate-700 uppercase mb-3">
+              <Timer class="w-4 h-4 text-emerald-500" /> เวลานับถอยหลัง
+              {#if !isOnline}<span class="text-[9px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded">(ประมาณการ)</span>{/if}
             </h3>
-            <div class="rounded-2xl bg-slate-900 py-4 text-center mb-3">
+            <div class="rounded-2xl bg-slate-900 py-4 text-center">
               <p class="text-4xl font-black text-emerald-400 tabnum tracking-widest">{fmtCountdown(secondsLeft)}</p>
             </div>
-            <div class="bg-emerald-50/60 border border-emerald-100 rounded-2xl p-4 flex items-start gap-3">
-              <div class="h-9 w-9 rounded-xl bg-emerald-100 grid place-items-center shrink-0">
-                <MapPin class="w-5 h-5 text-emerald-600" />
-              </div>
-              <div>
-                <p class="text-xs font-black text-emerald-900">จุดรับอาหาร</p>
-                <p class="text-xs text-emerald-700 mt-0.5">
-                  {Array.from(new Set(order.items.map((it) => it.storeName))).join(", ")} <br/>
-                  อาคารโรงอาหาร SPU · <span class="font-bold underline">ช่องบริการด่วน 2</span>
-                </p>
-              </div>
-            </div>
           </div>
 
-          <!-- Action Buttons -->
           <div class="grid grid-cols-2 gap-3">
-            <button onclick={reOrder} class="h-12 rounded-xl bg-white border border-slate-200 text-slate-700 text-xs font-bold flex items-center justify-center gap-2 hover:bg-slate-50 shadow-sm">
-              <Repeat class="w-4 h-4 text-emerald-600" /> สั่งเมนูเดิมอีกครั้ง
+            <button onclick={reOrder} class="h-12 rounded-xl bg-white border border-slate-200 text-slate-700 text-xs font-bold flex items-center justify-center gap-2 hover:bg-slate-50 whitespace-nowrap">
+              <Repeat class="w-4 h-4 text-emerald-600" /> สั่งอีกครั้ง
             </button>
-            <button onclick={() => (receiptOpen = true)} class="h-12 rounded-xl bg-white border border-slate-200 text-slate-700 text-xs font-bold flex items-center justify-center gap-2 hover:bg-slate-50 shadow-sm">
-              <Receipt class="w-4 h-4 text-emerald-600" /> ดูใบเสร็จรับเงิน
+            <button onclick={() => (receiptOpen = true)} class="h-12 rounded-xl bg-white border border-slate-200 text-slate-700 text-xs font-bold flex items-center justify-center gap-2 hover:bg-slate-50 whitespace-nowrap">
+              <Receipt class="w-4 h-4 text-emerald-600" /> ใบเสร็จ
             </button>
           </div>
 
-          {#if order.status === 2}
-            <button onclick={completeOrder} class="w-full h-14 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 bg-slate-900 text-white hover:bg-slate-800 shadow-xl transition">
-              <CheckCircle2 class="w-5 h-5" /> ได้รับอาหารเรียบร้อยแล้ว
-            </button>
-          {/if}
-
-          <!-- Review Box -->
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-5">
-            <h3 class="flex items-center gap-2 text-xs font-extrabold text-slate-700 uppercase tracking-wide mb-3">
+            <h3 class="flex items-center gap-2 text-xs font-extrabold text-slate-700 uppercase mb-3">
               <Star class="w-4 h-4 text-amber-400" /> ให้คะแนนความพึงพอใจ
             </h3>
             {#if submittedReview}
@@ -831,41 +1316,87 @@
                     <Star class={`w-6 h-6 ${n <= submittedReview.rating ? "text-amber-400 fill-amber-400" : "text-slate-200"}`} />
                   {/each}
                 </div>
-                <p class="text-xs font-bold text-emerald-600">ขอบคุณสำหรับคะแนนและคำติชมของคุณ!</p>
+                <p class="text-xs font-bold text-emerald-600">บันทึกรีวิวแล้ว · จะโพสต์เมื่อรับอาหารเสร็จ ✅</p>
               </div>
             {:else}
               <div class="flex justify-center gap-3 mb-4">
                 {#each [1, 2, 3, 4, 5] as n}
                   <button onclick={() => (rating = n)} class="p-1 active:scale-90 transition">
-                    <Star class={`w-9 h-9 transition-colors ${n <= rating ? "text-amber-400 fill-amber-400 drop-shadow" : "text-slate-200 hover:text-amber-200"}`} />
+                    <Star class={`w-9 h-9 transition-colors ${n <= rating ? "text-amber-400 fill-amber-400" : "text-slate-200"}`} />
                   </button>
                 {/each}
               </div>
-              <textarea bind:value={review} rows={2} placeholder="เขียนรีวิวสั้น ๆ เกี่ยวกับรสชาติและการให้บริการ..." class="w-full rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-400/50 resize-none"></textarea>
+              <textarea bind:value={review} rows={2} placeholder="เขียนรีวิว..." class="w-full rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-400/50 resize-none"></textarea>
               <button onclick={submitReview} class={`mt-3 w-full h-11 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition ${rating ? "bg-emerald-500 text-white hover:bg-emerald-600" : "bg-slate-100 text-slate-400"}`}>
-                <BadgeCheck class="w-4 h-4" /> ส่งความคิดเห็น
+                <BadgeCheck class="w-4 h-4" /> ส่งรีวิว
               </button>
             {/if}
           </div>
+
+          {#if order.status === 2}
+            <button onclick={completeOrder} class="w-full h-14 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 bg-slate-900 text-white hover:bg-slate-800 shadow-xl">
+              <CheckCircle2 class="w-5 h-5" /> ได้รับอาหารเรียบร้อยแล้ว
+            </button>
+          {/if}
         {/if}
       </div>
     {/if}
 
-    <!-- HISTORY SCREEN -->
+    <!-- HISTORY -->
     {#if screen === "history"}
       <div in:fade={{ duration: 150 }} class="max-w-2xl mx-auto space-y-4">
         <h2 class="text-lg font-extrabold text-slate-800">ประวัติคำสั่งซื้อทั้งหมด</h2>
+
+        {#if historyOrders.length === 0}
+          <div class="bg-white rounded-3xl border border-dashed border-slate-200 py-16 text-center px-6">
+            <History class="w-12 h-12 text-slate-300 mx-auto mb-3" />
+            <p class="text-base font-bold text-slate-700">ยังไม่มีประวัติการสั่งซื้อ</p>
+            <button onclick={() => (screen = "home")} class="mt-4 bg-emerald-500 text-white text-xs font-bold px-6 py-3 rounded-xl">
+              เริ่มสั่งอาหาร
+            </button>
+          </div>
+        {/if}
+
         <div class="space-y-3">
           {#each historyOrders as o (o.id)}
+            {@const linkedReview = reviews.find(r => r.id === o.reviewId)}
+            {@const orderStore = STORES.find(s => s.id === o.storeId)}
             <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-5">
               <div class="flex items-start justify-between">
-                <div>
+                <div class="min-w-0">
                   <p class="text-sm font-black text-slate-800 tabnum">{o.id}</p>
                   <p class="text-xs text-slate-400 mt-0.5">{o.date}</p>
+                  {#if orderStore}
+                    <span class="inline-flex items-center gap-1 text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md mt-1.5">
+                      <StoreIcon class="w-2.5 h-2.5" /> {orderStore.emoji} {orderStore.name}
+                    </span>
+                  {/if}
                 </div>
-                <span class="text-[10px] font-bold bg-slate-100 text-slate-600 px-3 py-1 rounded-full">เสร็จสิ้น</span>
+                <span class="text-[10px] font-bold bg-slate-100 text-slate-600 px-3 py-1 rounded-full whitespace-nowrap shrink-0">เสร็จสิ้น</span>
               </div>
               <p class="text-xs text-slate-600 mt-2.5">{o.items}</p>
+
+              {#if linkedReview}
+                <div class="mt-3 bg-emerald-50/70 border border-emerald-100 rounded-xl p-3">
+                  <div class="flex items-center gap-1.5 mb-1">
+                    <div class="flex gap-0.5">
+                      {#each [1, 2, 3, 4, 5] as n}
+                        <Star class={`w-3.5 h-3.5 ${n <= linkedReview.rating ? "text-amber-400 fill-amber-400" : "text-slate-200"}`} />
+                      {/each}
+                    </div>
+                    <span class="text-[10px] font-bold text-emerald-600">รีวิวของฉัน</span>
+                  </div>
+                  <p class="text-[11px] text-emerald-900 leading-relaxed italic">💬 "{linkedReview.text}"</p>
+                </div>
+              {:else}
+                <button
+                  onclick={() => (reviewingHistory = o)}
+                  class="mt-3 w-full h-10 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-bold flex items-center justify-center gap-2 hover:bg-emerald-100 transition"
+                >
+                  <PenLine class="w-3.5 h-3.5" /> เขียนรีวิวสำหรับออเดอร์นี้
+                </button>
+              {/if}
+
               <div class="flex items-center justify-between mt-3 pt-3 border-t border-slate-100">
                 <div class="flex gap-1">
                   {#each [1, 2, 3, 4, 5] as n}
@@ -881,7 +1412,6 @@
     {/if}
   </main>
 
-  <!-- Mobile Floating Cart Bar (แสดงเฉพาะหน้าจอมือถือ) -->
   {#if screen === "home" && count > 0}
     <div transition:fly={{ y: 90, duration: 200 }} class="md:hidden fixed left-4 right-4 bottom-20 z-30">
       <div class="bg-slate-900 rounded-2xl p-3 shadow-2xl flex items-center justify-between border border-slate-800">
@@ -891,18 +1421,17 @@
             <span class="absolute -top-1.5 -right-1.5 h-4 min-w-4 px-1 rounded-full bg-white text-slate-900 text-[10px] font-black grid place-items-center">{count}</span>
           </div>
           <div>
-            <p class="text-[11px] text-slate-400 leading-none">สั่งรวม {count} รายการ</p>
-            <p class="text-base font-extrabold text-white tabnum leading-tight mt-1">{money(total)}</p>
+            <p class="text-[11px] text-slate-400">สั่งรวม {count} รายการ</p>
+            <p class="text-base font-extrabold text-white tabnum mt-1">{money(total)}</p>
           </div>
         </div>
-        <button onclick={() => requireAuth(() => (screen = "checkout"))} class="bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold px-4 py-2.5 rounded-xl flex items-center gap-1.5 shadow-md shadow-emerald-500/25">
+        <button onclick={() => requireAuth(() => (screen = "checkout"))} class="bg-emerald-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl flex items-center gap-1.5 whitespace-nowrap">
           ชำระเงิน <ChevronRight class="w-4 h-4" strokeWidth={3} />
         </button>
       </div>
     </div>
   {/if}
 
-  <!-- Mobile Bottom Navigation Bar (แสดงเฉพาะหน้าจอมือถือ) -->
   <nav class="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur border-t border-slate-200 py-2 px-3">
     <div class="flex items-center justify-around">
       {#each [
@@ -917,73 +1446,33 @@
           <span class={`relative transition-colors ${active ? "text-emerald-600" : "text-slate-400"}`}>
             <IconComp class="w-5 h-5" />
             {#if t.badge && t.badge > 0}
-              <span class="absolute -top-1.5 -right-2.5 h-4 min-w-4 px-1 rounded-full bg-emerald-500 text-white text-[9px] font-black grid place-items-center tabnum">{t.badge}</span>
+              <span class="absolute -top-1.5 -right-2.5 h-4 min-w-4 px-1 rounded-full bg-emerald-500 text-white text-[9px] font-black grid place-items-center">{t.badge}</span>
             {/if}
           </span>
-          <span class={`text-[10px] font-bold ${active ? "text-emerald-600" : "text-slate-500"}`}>{t.label}</span>
-          {#if active}
-            <span class="absolute -bottom-1 h-1 w-1 rounded-full bg-emerald-500"></span>
-          {/if}
+          <span class={`text-[10px] font-bold whitespace-nowrap ${active ? "text-emerald-600" : "text-slate-500"}`}>{t.label}</span>
         </button>
       {/each}
     </div>
   </nav>
 
-  <!-- Demo Control Widget (Floating FAB) -->
   <div class="fixed right-4 bottom-24 md:bottom-6 z-40 flex flex-col items-end gap-2">
     {#if demoOpen}
       <div transition:fly={{ y: 12, duration: 150 }} class="bg-slate-900/95 backdrop-blur-md rounded-2xl p-3 shadow-2xl w-48 border border-slate-700 text-white">
-        <p class="text-[10px] font-extrabold text-emerald-400 uppercase tracking-widest px-1 mb-2">จำลองหน้าจอ Demo</p>
+        <p class="text-[10px] font-extrabold text-emerald-400 uppercase tracking-widest mb-2">Demo Controls</p>
         <div class="grid grid-cols-2 gap-1.5">
-          {#each [
-            { key: "home", label: "Menu", icon: Home },
-            { key: "checkout", label: "Cart", icon: ShoppingCart },
-            { key: "tracking", label: "Track", icon: Timer },
-            { key: "history", label: "History", icon: History },
-          ] as b}
-            {@const IconComp = b.icon}
+          {#each ["home", "checkout", "tracking", "history"] as k}
             <button
-              onclick={() => { handleNav(b.key as Screen); demoOpen = false; }}
-              class={`h-8 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 transition ${
-                screen === b.key ? "bg-emerald-500 text-white" : "bg-white/10 text-slate-300 hover:bg-white/20"
-              }`}
+              onclick={() => { handleNav(k as Screen); demoOpen = false; }}
+              class={`h-8 rounded-lg text-[10px] font-bold transition whitespace-nowrap ${screen === k ? "bg-emerald-500" : "bg-white/10 hover:bg-white/20"}`}
             >
-              <IconComp class="w-3 h-3" />{b.label}
-            </button>
-          {/each}
-        </div>
-        <div class="h-px bg-white/10 my-2.5"></div>
-        <p class="text-[10px] font-bold text-slate-400 px-1 mb-1.5">ข้ามขั้นตอนสถานะ</p>
-        <div class="space-y-1">
-          {#each ["1. รับออเดอร์", "2. กำลังปรุง", "3. พร้อมรับ"] as label, i}
-            <button
-              disabled={!order}
-              onclick={() => {
-                if (!order) return;
-                order = { ...order, status: i as OrderStatus };
-                if (i === 1) {
-                  showToast("🔔 อีก 5 นาทีจะถึงเวลานัดรับ กรุณาเตรียมตัวเดินทางมายังโรงอาหาร");
-                } else if (i === 2) {
-                  secondsLeft = 0;
-                  showToast("🔔 อาหารของคุณเสร็จแล้ว! รหัส " + order.code);
-                }
-              }}
-              class={`w-full h-7 rounded-lg text-[10px] font-bold transition ${
-                !order ? "bg-white/5 text-slate-600 cursor-not-allowed" : order.status === i ? "bg-emerald-500 text-white" : "bg-white/10 text-slate-300 hover:bg-white/20"
-              }`}
-            >
-              {label}
+              {k}
             </button>
           {/each}
         </div>
       </div>
     {/if}
-    <button onclick={() => (demoOpen = !demoOpen)} class="h-11 w-11 rounded-full bg-slate-900 text-emerald-400 shadow-xl grid place-items-center border border-slate-700 hover:scale-105 active:scale-95 transition">
-      {#if demoOpen}
-        <X class="w-5 h-5" />
-      {:else}
-        <Zap class="w-5 h-5" />
-      {/if}
+    <button onclick={() => (demoOpen = !demoOpen)} class="h-11 w-11 rounded-full bg-slate-900 text-emerald-400 shadow-xl grid place-items-center border border-slate-700 hover:scale-105 transition">
+      {#if demoOpen}<X class="w-5 h-5" />{:else}<Zap class="w-5 h-5" />{/if}
     </button>
   </div>
 
@@ -1002,6 +1491,7 @@
   {#if showLogin}
     <LoginModal
       loading={loginLoading}
+      lastLogin={lastLoginMethod}
       onClose={() => (showLogin = false)}
       onLogin={(method) => executeLoginSuccess(method)}
     />
@@ -1011,6 +1501,32 @@
     <ReceiptModal
       {order}
       onClose={() => (receiptOpen = false)}
+    />
+  {/if}
+
+  {#if editingReview}
+    <EditReviewModal
+      review={editingReview}
+      onClose={() => (editingReview = null)}
+      onSave={handleSaveReview}
+    />
+  {/if}
+
+  {#if reportingReview}
+    <ReportModal
+      review={reportingReview}
+      onClose={() => (reportingReview = null)}
+      onSubmit={handleSubmitReport}
+    />
+  {/if}
+
+  {#if reviewModalData}
+    <ReviewModal
+      orderSummary={reviewModalData.order.items}
+      storeName={reviewModalData.store?.name ?? "ไม่ทราบร้าน"}
+      storeEmoji={reviewModalData.store?.emoji ?? "🏪"}
+      onClose={() => (reviewingHistory = null)}
+      onSubmit={handleHistoryReviewSubmit}
     />
   {/if}
 </div>

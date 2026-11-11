@@ -11,6 +11,9 @@ export interface Store {
   queue: number;
   location: string;
   emoji: string;
+  popularity?: number;
+  isNew?: boolean;
+  trending?: boolean;
 }
 
 export interface MenuItem {
@@ -22,6 +25,9 @@ export interface MenuItem {
   emoji: string;
   tag?: string;
   optionsType?: OptionType;
+  prepTime?: string;
+  calories?: number;
+  popularity?: number;
 }
 
 export interface CartItem {
@@ -57,4 +63,34 @@ export interface PastOrder {
   items: string;
   total: number;
   rating: number;
+  reviewId?: string;
+  storeId?: string;
+}
+
+export interface Review {
+  id: string;
+  userId: string;
+  userName: string;
+  storeId: string;
+  itemId?: string;
+  rating: number;
+  text: string;
+  date: number;
+  orderId?: string;
+}
+
+export interface User {
+  id: string;
+  name: string;
+  email?: string;
+  loginMethod?: string;
+}
+
+// ⬇️ เพิ่มใหม่: ออเดอร์สด (ของเรา + จำลองลูกค้าคนอื่น) สำหรับสถิติเรียลไทม์
+export interface LiveOrder {
+  id: string;
+  storeIds: string[];
+  status: OrderStatus;
+  isMine: boolean;
+  customer: string;
 }
