@@ -83,7 +83,26 @@
     return (maxPrepTime + queueBuffer) * 60;
   };
 
-  // ⬇️ ใหม่: รายชื่อธนาคารสำหรับช่องทาง Mobile Banking (คลิกเลือกได้)
+  const inferStoreIdFromItems = (itemsText: string): string => {
+    const found = MENU.find(m => itemsText.includes(m.name));
+    return found?.storeId ?? "s1";
+  };
+
+  const migrateHistory = (history: PastOrder[]): PastOrder[] =>
+    history.map(h => (h.storeId ? h : { ...h, storeId: inferStoreIdFromItems(h.items) }));
+
+  const migrateReviews = (revs: Review[], history: PastOrder[]): Review[] =>
+    revs.map(r => {
+      if (r.orderId) {
+        const h = history.find(x => x.id === r.orderId);
+        if (h && h.storeId && h.storeId !== r.storeId) {
+          return { ...r, storeId: h.storeId };
+        }
+      }
+      return r;
+    });
+
+  // ===== ธนาคาร (คลิกเลือกได้) =====
   interface BankOption {
     id: string;
     name: string;
@@ -104,6 +123,13 @@
     total: number;
   }
 
+  // ===== ขอบเขตการไหลของสถิติต่อร้าน =====
+  const ACTIVE_MIN = 10;
+  const ACTIVE_MAX = 20;
+  const READY_MIN = 2;
+  const READY_MAX = 8;
+  const SIM_TICK_MS = 2500;
+
   const createSimOrder = (storeId: string, status: OrderStatus): LiveOrder => ({
     id: "SIM-" + Math.random().toString(36).slice(2, 8),
     storeIds: [storeId],
@@ -112,15 +138,21 @@
     customer: "นักศึกษา " + Math.floor(66000000 + Math.random() * 999999),
   });
 
-  const seedLiveOrders = (): LiveOrder[] => [
-    createSimOrder("s1", 0),
-    createSimOrder("s1", 1),
-    createSimOrder("s2", 0),
-    createSimOrder("s3", 1),
-    createSimOrder("s3", 2),
-    createSimOrder("s5", 0),
-    createSimOrder("s6", 1),
-  ];
+  // Seed: แต่ละร้านมีลูกค้ากำลังสั่ง 10-20 + คิวพร้อมรับ 2-8 ตั้งแต่เปิดแอป
+  const seedLiveOrders = (): LiveOrder[] => {
+    const list: LiveOrder[] = [];
+    for (const s of STORES) {
+      const active = ACTIVE_MIN + Math.floor(Math.random() * (ACTIVE_MAX - ACTIVE_MIN + 1));
+      for (let i = 0; i < active; i++) {
+        list.push(createSimOrder(s.id, (Math.random() < 0.5 ? 0 : 1) as OrderStatus));
+      }
+      const ready = READY_MIN + Math.floor(Math.random() * (READY_MAX - READY_MIN + 1));
+      for (let i = 0; i < ready; i++) {
+        list.push(createSimOrder(s.id, 2));
+      }
+    }
+    return list;
+  };
 
   // ============ States ============
   let isAuthenticated = $state(true);
@@ -145,7 +177,7 @@
   let slot = $state<string>("12:00 น.");
   let orderNote = $state<string>("");
   let payMethod = $state<"promptpay" | "banking">("promptpay");
-  let selectedBank = $state<string | null>(null); // ⬅️ ใหม่: ธนาคารที่เลือก
+  let selectedBank = $state<string | null>(null);
   let paying = $state(false);
   let query = $state("");
 
@@ -155,8 +187,11 @@
   let soundOn = $state(true);
   let receiptOpen = $state(false);
 
-  let historyOrders = $state<PastOrder[]>(loadFromStorage<PastOrder[]>('spu_history', INITIAL_PAST_ORDERS));
-  let reviews = $state<Review[]>(loadFromStorage<Review[]>('spu_reviews', INITIAL_REVIEWS));
+  const seededHistory = migrateHistory(loadFromStorage<PastOrder[]>('spu_history', INITIAL_PAST_ORDERS));
+  let historyOrders = $state<PastOrder[]>(seededHistory);
+  let reviews = $state<Review[]>(
+    migrateReviews(loadFromStorage<Review[]>('spu_reviews', INITIAL_REVIEWS), seededHistory)
+  );
 
   $effect(() => { saveToStorage('spu_history', historyOrders); });
   $effect(() => { saveToStorage('spu_reviews', reviews); });
@@ -173,8 +208,9 @@
   let reviewModalData = $derived.by(() => {
     const target = reviewingHistory;
     if (!target) return null;
-    const store = STORES.find(s => s.id === target.storeId);
-    return { order: target, store };
+    const storeId = target.storeId ?? inferStoreIdFromItems(target.items);
+    const store = STORES.find(s => s.id === storeId);
+    return { order: target, store, storeId };
   });
 
   let myOrderStoreIds = $derived.by(() => {
@@ -200,7 +236,6 @@
     return map;
   });
 
-  // ⬇️ ใหม่: ธนาคารที่เลือกอยู่ (object) ใช้แสดงชื่อบนปุ่มยืนยัน
   let selectedBankObj = $derived(BANKS.find(b => b.id === selectedBank) ?? null);
 
   let demoOpen = $state(false);
@@ -223,7 +258,6 @@
     }
   };
 
-  // ⬇️ ใหม่: คลิกเลือกธนาคาร
   const selectBank = (b: BankOption) => {
     selectedBank = b.id;
     showToast(`เลือกชำระเงินผ่าน ${b.name} (${b.app}) แล้ว`);
@@ -338,7 +372,6 @@
       return;
     }
 
-    // ⬇️ ใหม่: ถ้าเลือก Mobile Banking ต้องแตะเลือกธนาคารก่อน
     if (payMethod === "banking" && !selectedBank) {
       showToast("กรุณาเลือกธนาคารก่อนชำระเงิน");
       return;
@@ -402,9 +435,12 @@
   const completeOrder = () => {
     if (!order) return;
 
+    const itemsText = order.items
+      .map((i) => `${i.name}${i.option ? ` (${i.option})` : ""} ×${i.qty}`)
+      .join(", ");
     const firstItemName = order.items[0]?.name;
     const foundMenuItem = firstItemName ? MENU.find(m => m.name === firstItemName) : null;
-    const orderStoreId = foundMenuItem?.storeId ?? activeStoreId;
+    const orderStoreId = foundMenuItem?.storeId ?? inferStoreIdFromItems(itemsText);
 
     liveOrders = liveOrders.filter(o => o.id !== order!.id);
 
@@ -414,7 +450,7 @@
         new Date(order.createdAt).toLocaleDateString("th-TH", {
           day: "2-digit", month: "short", year: "numeric",
         }) + " · " + order.slot,
-      items: order.items.map((i) => `${i.name}${i.option ? ` (${i.option})` : ""} ×${i.qty}`).join(", "),
+      items: itemsText,
       total: order.total,
       rating: submittedReview ? submittedReview.rating : 0,
       storeId: orderStoreId,
@@ -522,12 +558,13 @@
     const target = reviewingHistory;
     if (!target) return;
 
+    const targetStoreId = target.storeId ?? inferStoreIdFromItems(target.items);
     const reviewId = "r" + Date.now();
     const newReview: Review = {
       id: reviewId,
       userId: currentUserId,
       userName: `${currentUserName} (${currentUserId})`,
-      storeId: target.storeId ?? "s1",
+      storeId: targetStoreId,
       rating: ratingValue,
       text,
       date: Date.now(),
@@ -535,7 +572,7 @@
     };
     reviews = [newReview, ...reviews];
     historyOrders = historyOrders.map(h =>
-      h.id === target.id ? { ...h, rating: ratingValue, reviewId } : h
+      h.id === target.id ? { ...h, rating: ratingValue, reviewId, storeId: targetStoreId } : h
     );
     reviewingHistory = null;
     showToast("ส่งรีวิวเรียบร้อย ขอบคุณค่ะ 🙏");
@@ -548,27 +585,61 @@
       }
     }, 1000);
 
+    // ===== Simulation Engine: สถิติไหลขึ้น-ลงสอดคล้องกันรายร้าน =====
     const simInterval = setInterval(() => {
       if (!isOnline) return;
 
-      let next = liveOrders
-        .map(o => {
-          if (o.isMine) return o;
-          if (o.status < 2 && Math.random() < 0.35) {
-            return { ...o, status: (o.status + 1) as OrderStatus };
-          }
-          return o;
-        })
-        .filter(o => o.isMine || !(o.status === 2 && Math.random() < 0.35));
+      const mine = liveOrders.filter(o => o.isMine);
+      let sim = liveOrders.filter(o => !o.isMine);
 
-      const simCount = next.filter(o => !o.isMine).length;
-      if (simCount < 10 && Math.random() < 0.45) {
-        const s = STORES[Math.floor(Math.random() * STORES.length)];
-        next = [...next, createSimOrder(s.id, 0)];
+      // 1) เลื่อนสถานะ: รับออเดอร์ → กำลังปรุง → พร้อมรับ
+      sim = sim.map(o =>
+        o.status < 2 && Math.random() < 0.3 ? { ...o, status: (o.status + 1) as OrderStatus } : o
+      );
+
+      // 2) ออเดอร์พร้อมรับถูกรับออก (ไหลลง) แต่รักษาขั้นต่ำต่อร้านไว้
+      const readyCount: Record<string, number> = {};
+      for (const o of sim) {
+        if (o.status === 2) readyCount[o.storeIds[0]] = (readyCount[o.storeIds[0]] ?? 0) + 1;
+      }
+      sim = sim.filter(o => {
+        if (o.status === 2) {
+          const sid = o.storeIds[0];
+          const c = readyCount[sid] ?? 0;
+          const p = c > READY_MAX ? 0.8 : 0.35; // คิวพร้อมรับเยอะเกินไป → รับออกเร็วขึ้น
+          if (c > READY_MIN && Math.random() < p) {
+            readyCount[sid] = c - 1;
+            return false;
+          }
+        }
+        return true;
+      });
+
+      // 3) คุมจำนวนลูกค้ากำลังสั่งต่อร้านให้อยู่ในกรอบ 10-20 (ไหลขึ้น)
+      for (const s of STORES) {
+        const ofStore = sim.filter(o => o.storeIds.includes(s.id));
+        const active = ofStore.filter(o => o.status < 2).length;
+
+        if (active < ACTIVE_MIN) {
+          const need = ACTIVE_MIN - active + Math.floor(Math.random() * 3);
+          for (let i = 0; i < need; i++) sim = [...sim, createSimOrder(s.id, 0)];
+        } else if (active > ACTIVE_MAX) {
+          let excess = active - ACTIVE_MAX;
+          sim = sim.filter(o => {
+            if (excess > 0 && o.storeIds.includes(s.id) && o.status === 0 && Math.random() < 0.8) {
+              excess--;
+              return false;
+            }
+            return true;
+          });
+        } else if (Math.random() < 0.5) {
+          const add = 1 + (Math.random() < 0.3 ? 1 : 0);
+          for (let i = 0; i < add; i++) sim = [...sim, createSimOrder(s.id, 0)];
+        }
       }
 
-      liveOrders = next;
-    }, 7000);
+      liveOrders = [...mine, ...sim];
+    }, SIM_TICK_MS);
 
     const handleOnline = () => {
       isOnline = true;
@@ -857,6 +928,7 @@
               </div>
             </div>
 
+            <!-- แถบสถิติสด: เหลือแค่ chip 3 ตัว (ไม่มีป้ายกำกับ) -->
             <div class="flex flex-wrap items-center gap-2 bg-slate-50 border-t border-slate-100 px-5 py-3">
               <span class="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-600 bg-white border border-slate-200 rounded-full px-3 py-1.5">
                 <Users class="w-3.5 h-3.5 text-orange-500" /> ลูกค้ากำลังสั่ง: {storeStats[activeStoreId].active}
@@ -865,7 +937,7 @@
                 <Receipt class="w-3.5 h-3.5 text-emerald-500" /> ออเดอร์ทั้งหมด: {storeStats[activeStoreId].total}
               </span>
               <span class="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-600 bg-white border border-slate-200 rounded-full px-3 py-1.5">
-                <CheckCircle2 class="w-3.5 h-3.5 text-emerald-500" /> พร้อมรับ: {storeStats[activeStoreId].ready}
+                <CheckCircle2 class="w-3.5 h-3.5 text-teal-500" /> พร้อมรับ: {storeStats[activeStoreId].ready}
               </span>
             </div>
           </div>
@@ -1076,7 +1148,6 @@
             </div>
           </div>
 
-          <!-- ===== ช่องทางชำระเงิน ===== -->
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200/80 p-5">
             <h3 class="flex items-center gap-2 text-xs font-extrabold text-slate-700 uppercase tracking-wide mb-3">
               <QrCode class="w-4 h-4 text-emerald-500" /> ช่องทางชำระเงิน
@@ -1108,11 +1179,7 @@
                 <p class="text-xl font-black text-emerald-600 tabnum mt-3">{money(total)}</p>
               </div>
             {:else}
-              <!-- ⬇️ ใหม่: รายชื่อธนาคารแบบคลิกเลือกได้ -->
               <div class="rounded-2xl bg-slate-50 p-3 space-y-2">
-                {#if !selectedBank}
-                  <p class="text-[10px] font-bold text-slate-400 px-1 pb-0.5">แตะเพื่อเลือกธนาคารที่ต้องการชำระเงิน</p>
-                {/if}
                 {#each BANKS as b (b.id)}
                   {@const selected = selectedBank === b.id}
                   <button
@@ -1148,7 +1215,6 @@
             {/if}
           </div>
 
-          <!-- ⬇️ ปุ่มยืนยัน: บังคับเลือกธนาคารเมื่อใช้ Mobile Banking -->
           <button
             onclick={confirmOrder}
             disabled={paying || !isOnline || (payMethod === "banking" && !selectedBank)}

@@ -25,6 +25,8 @@ export default defineConfig({
         ]
       },
       workbox: {
+        // ⬇️ แก้: ขยายขีดจำกัดจาก 2 MiB เป็น 10 MiB ให้ logo.png (3.31 MB) ถูก precache
+        maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
         globPatterns: ['**/*.{js,css,html,ico,png,svg,webp}'],
         runtimeCaching: [
           {
